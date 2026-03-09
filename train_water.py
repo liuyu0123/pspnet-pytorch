@@ -126,12 +126,12 @@ if __name__ == "__main__":
     #   冻结阶段训练参数
     #------------------------------------------------------------------#
     Init_Epoch          = 0
-    Freeze_Epoch        = 50
+    Freeze_Epoch        = 5
     Freeze_batch_size   = 8
     #------------------------------------------------------------------#
     #   解冻阶段训练参数
     #------------------------------------------------------------------#
-    UnFreeze_Epoch      = 100
+    UnFreeze_Epoch      = 5
     Unfreeze_batch_size = 4
     #------------------------------------------------------------------#
     #   Freeze_Train    是否进行冻结训练
@@ -162,10 +162,12 @@ if __name__ == "__main__":
     image_folder    = r'640_320_undistorted'
     
     #   标签文件夹路径
-    label_folder    = r'640_320_undistorted_gif'
+    # label_folder    = r'640_320_undistorted_gif'
+    label_folder    = r'640_320_undistorted_pspnet'
     
     #   标签文件后缀（空字符串表示同名：001.jpg -> 001.gif）
-    label_suffix    = '_mask'  # <-- 你的数据没有 _mask 后缀！
+    # label_suffix    = '_mask'  # <-- 你的数据没有 _mask 后缀！
+    label_suffix    = ''
     
     #   标签文件扩展名（你的标签是 .gif 格式）
     label_ext       = '.png'  # <-- 新增：定义标签扩展名！

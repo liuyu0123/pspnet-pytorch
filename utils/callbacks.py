@@ -133,6 +133,13 @@ class EvalCallback:
                 images = images.cuda()
                 
             pr = self.net(images)
+            # 处理 PSPNet aux 输出
+            if isinstance(pr, (list, tuple)):
+                pr = pr[-1]
+
+            # 去掉 batch 维
+            pr = pr.squeeze(0)
+
             if isinstance(pr, (list, tuple)) and len(pr) == 2:
                 pr = pr[1]
             pr = pr[0] if isinstance(pr, (list, tuple)) else pr
@@ -196,7 +203,16 @@ class EvalCallback:
                 return
             
             # 计算 mIoU
-            _, IoUs, _, _ = compute_mIoU(self.labels_path, pred_dir, valid_ids, self.num_classes, None)
+            # _, IoUs, _, _ = compute_mIoU(self.labels_path, pred_dir, valid_ids, self.num_classes, None)
+            _, IoUs, _, _ = compute_mIoU(
+                self.labels_path,
+                pred_dir,
+                valid_ids,
+                self.num_classes,
+                None,
+                self.label_suffix,
+                self.label_ext
+            )
             temp_miou = np.nanmean(IoUs) * 100
 
             self.mious.append(temp_miou)

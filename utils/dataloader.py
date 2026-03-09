@@ -109,11 +109,12 @@ class PSPnetDataset(Dataset):
         # 但为了兼容你原有的返回结构，这里也转为 Tensor
         seg_labels_np = np.eye(self.num_classes + 1)[png_np.reshape([-1])]
         seg_labels_np = seg_labels_np.reshape((int(self.input_shape[0]), int(self.input_shape[1]), self.num_classes + 1))
+
         # 转置为 (C, H, W) 以便与图片对齐 (如果需要)，或者保持 (H, W, C) 视模型而定
         # 原代码返回的是 (H, W, C)，这里我们保持原样转 Tensor，或者转置
         # 假设你的模型期望 (H, W, C) 或者你在 train_water.py 里处理了
         # 为了安全，我们转置为 (C, H, W) 以符合 PyTorch 习惯，除非你确定不需要
-        seg_labels_tensor = torch.from_numpy(np.transpose(seg_labels_np, [2, 0, 1])).float()
+        seg_labels_tensor = torch.from_numpy(seg_labels_np).float()
 
         return jpg_tensor, png_tensor, seg_labels_tensor
 

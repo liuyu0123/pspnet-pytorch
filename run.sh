@@ -37,6 +37,24 @@ python train_water_val.py `
     --no-freeze          # 跳过冻结训练阶段
 
 
+#训练模型（水域分割，train和val分开）
+# 基础测试✅
+python test_water.py `
+    --model logs/checkpoint_best.pth `
+    --images D:\Files\Data\IRWSB\test\images `
+    --masks D:\Files\Data\IRWSB\test\masks_pspnet
+# 指定模型配置和输出路径
+python test_water.py `
+    --model logs/checkpoint_best.pth `
+    --images D:\Files\Data\IRWSB\test\images `
+    --masks D:\Files\Data\IRWSB\test\masks_pspnet
+    --backbone mobilenet `
+    --num-classes 2 `
+    --input-height 320 `
+    --input-width 640 `
+    --batch-size 4 `
+    --output results/pspnet_test.csv
+
 
 #测试模型
 python predict.py

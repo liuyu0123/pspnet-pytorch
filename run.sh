@@ -2,6 +2,41 @@
 python train.py
 #训练模型（水域分割）
 python train_water.py
+#训练模型（水域分割，train和val分开）
+#用法1：独立 train/val 路径
+python train_water.py `
+    --images D:\Files\Data\IRWSB\train\images `
+    --masks D:\Files\Data\IRWSB\train\masks_white `
+    --val-images D:\Files\Data\IRWSB\val\images `
+    --val-masks D:\Files\Data\IRWSB\val\masks_white `
+    --epochs 50 `
+    --batch-size 4
+#用法2：只指定 train，自动划分 val
+python train_water.py `
+    --images D:\Files\Data\IRWSB\images `
+    --masks D:\Files\Data\IRWSB\masks `
+    --val-split 0.1 `
+    --epochs 50
+#用法3：其他常用参数
+python train_water.py `
+    --images D:\Files\Data\IRWSB\train\images `
+    --masks D:\Files\Data\IRWSB\train\masks_white `
+    --val-images D:\Files\Data\IRWSB\val\images `
+    --val-masks D:\Files\Data\IRWSB\val\masks_white `
+    --epochs 100 `
+    --freeze-epochs 10 `
+    --batch-size 4 `
+    --freeze-batch-size 8 `
+    --lr 1e-2 `
+    --optimizer sgd `
+    --backbone mobilenet `
+    --input-height 320 `
+    --input-width 640 `
+    --save-dir logs_irwsb `
+    --mask-ext .png `
+    --no-freeze          # 跳过冻结训练阶段
+
+
 
 #测试模型
 python predict.py

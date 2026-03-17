@@ -3,26 +3,26 @@ python train.py
 #训练模型（水域分割）
 python train_water.py
 #训练模型（水域分割，train和val分开）
-#用法1：独立 train/val 路径
-python train_water.py `
+#用法1：独立 train/val 路径✅
+python train_water_val.py `
     --images D:\Files\Data\IRWSB\train\images `
-    --masks D:\Files\Data\IRWSB\train\masks_white `
+    --masks D:\Files\Data\IRWSB\train\masks_pspnet `
     --val-images D:\Files\Data\IRWSB\val\images `
-    --val-masks D:\Files\Data\IRWSB\val\masks_white `
-    --epochs 50 `
+    --val-masks D:\Files\Data\IRWSB\val\masks_pspnet `
+    --epochs 5 `
     --batch-size 4
 #用法2：只指定 train，自动划分 val
-python train_water.py `
+python train_water_val.py `
     --images D:\Files\Data\IRWSB\images `
     --masks D:\Files\Data\IRWSB\masks `
     --val-split 0.1 `
-    --epochs 50
+    --epochs 5
 #用法3：其他常用参数
-python train_water.py `
+python train_water_val.py `
     --images D:\Files\Data\IRWSB\train\images `
-    --masks D:\Files\Data\IRWSB\train\masks_white `
+    --masks D:\Files\Data\IRWSB\train\masks_pspnet `
     --val-images D:\Files\Data\IRWSB\val\images `
-    --val-masks D:\Files\Data\IRWSB\val\masks_white `
+    --val-masks D:\Files\Data\IRWSB\val\masks_pspnet `
     --epochs 100 `
     --freeze-epochs 10 `
     --batch-size 4 `

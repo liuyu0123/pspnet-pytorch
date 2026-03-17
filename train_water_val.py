@@ -10,6 +10,10 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim as optim
 from torch.utils.data import DataLoader
+import csv
+import time
+from pathlib import Path
+from collections import defaultdict
 
 from nets.pspnet import PSPNet
 from nets.pspnet_training import (get_lr_scheduler, set_optimizer_lr,
@@ -22,9 +26,7 @@ from utils.utils_fit import fit_one_epoch
 
 
 def get_files_from_dir(image_dir, label_dir, label_ext='.png', label_suffix=''):
-    """
-    从目录中读取所有有效的图片-标签对
-    """
+    """从目录中读取所有有效的图片-标签对"""
     valid_files = []
     image_exts = ['.jpg', '.jpeg', '.png', '.bmp']
     
@@ -57,9 +59,7 @@ def get_files_from_dir(image_dir, label_dir, label_ext='.png', label_suffix=''):
 def split_dataset(image_dir, val_split=0.1, seed=42, label_dir=None, 
                   image_exts=['.jpg', '.jpeg', '.png', '.bmp'], 
                   label_ext='.png', label_suffix=''): 
-    """
-    自动分割数据集（从同一目录划分）
-    """
+    """自动分割数据集（从同一目录划分）"""
     random.seed(seed)
     
     if label_dir is None:
@@ -82,10 +82,197 @@ def split_dataset(image_dir, val_split=0.1, seed=42, label_dir=None,
     return train_lines, val_lines
 
 
+def compute_metrics(pred_mask, true_mask, num_classes):
+    """计算分割指标：Precision, Recall, F1, IoU（宏平均）"""
+    pred_mask = pred_mask.view(-1)
+    true_mask = true_mask.view(-1)
+    
+    metrics_per_class = []
+    
+    for cls in range(num_classes):
+        pred_cls = (pred_mask == cls).float()
+        true_cls = (true_mask == cls).float()
+        
+        tp = (pred_cls * true_cls).sum()
+        fp = (pred_cls * (1 - true_cls)).sum()
+        fn = ((1 - pred_cls) * true_cls).sum()
+        
+        precision = tp / (tp + fp + 1e-10)
+        recall = tp / (tp + fn + 1e-10)
+        f1 = 2 * precision * recall / (precision + recall + 1e-10)
+        iou = tp / (tp + fp + fn + 1e-10)
+        
+        if true_cls.sum() > 0:
+            metrics_per_class.append({
+                'precision': precision.item(),
+                'recall': recall.item(),
+                'f1': f1.item(),
+                'iou': iou.item(),
+            })
+    
+    if metrics_per_class:
+        return {
+            'precision': np.mean([m['precision'] for m in metrics_per_class]),
+            'recall': np.mean([m['recall'] for m in metrics_per_class]),
+            'f1': np.mean([m['f1'] for m in metrics_per_class]),
+            'miou': np.mean([m['iou'] for m in metrics_per_class]),
+        }
+    return {'precision': 0, 'recall': 0, 'f1': 0, 'miou': 0}
+
+
+@torch.no_grad()
+def evaluate_metrics(model, dataloader, device, num_classes):
+    """详细评估模型，返回各项指标和推理时间"""
+    model.eval()
+    
+    all_preds = []
+    all_targets = []
+    total_loss = 0
+    num_batches = 0
+    inference_times = []
+    
+    criterion = torch.nn.CrossEntropyLoss()
+    
+    for batch in dataloader:
+        images, labels = batch[0], batch[1]  # pspnet_dataset_collate 返回格式
+        images = images.to(device)
+        labels = labels.to(device)
+        
+        # 测量推理时间
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        start = time.time()
+        
+        outputs = model(images)
+        # PSPNet 返回主输出和辅助输出（如果有）
+        if isinstance(outputs, (list, tuple)):
+            main_output = outputs[0]
+        else:
+            main_output = outputs
+            
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        inference_times.append(time.time() - start)
+        
+        # 计算 loss（只对主输出）
+        loss = criterion(main_output, labels)
+        total_loss += loss.item()
+        num_batches += 1
+        
+        # 获取预测结果
+        preds = main_output.argmax(dim=1)
+        
+        all_preds.append(preds.cpu())
+        all_targets.append(labels.cpu())
+    
+    # 计算指标
+    all_preds = torch.cat(all_preds)
+    all_targets = torch.cat(all_targets)
+    metrics = compute_metrics(all_preds, all_targets, num_classes)
+    metrics['loss'] = total_loss / num_batches
+    metrics['inference_time_ms'] = np.mean(inference_times) * 1000
+    metrics['fps'] = images.size(0) / np.mean(inference_times) if np.mean(inference_times) > 0 else 0
+    
+    return metrics
+
+
+def get_model_info(model):
+    """获取模型静态信息"""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return {
+        'total_params': total_params,
+        'trainable_params': trainable_params,
+        'model_size_mb': total_params * 4 / (1024 * 1024),
+    }
+
+
+class MetricsLogger:
+    """指标记录器，支持 CSV 和 TensorBoard"""
+    
+    def __init__(self, save_dir, model, input_shape, local_rank=0):
+        self.save_dir = Path(save_dir)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.local_rank = local_rank
+        
+        # CSV 设置
+        self.csv_path = self.save_dir / 'training_log.csv'
+        self.header = [
+            'epoch',
+            'train_loss', 'train_precision', 'train_recall', 'train_f1', 'train_miou',
+            'val_loss', 'val_precision', 'val_recall', 'val_f1', 'val_miou',
+            'inference_time_ms', 'fps', 'learning_rate'
+        ]
+        self.rows = []
+        
+        # 保留原有的 LossHistory 功能
+        if local_rank == 0:
+            from torch.utils.tensorboard import SummaryWriter
+            self.writer = SummaryWriter(self.save_dir)
+            self.loss_history = LossHistory(save_dir, model, input_shape=input_shape)
+        else:
+            self.writer = None
+            self.loss_history = None
+            
+    def log_epoch(self, epoch, train_metrics, val_metrics, lr):
+        """记录一轮数据"""
+        row = {
+            'epoch': epoch,
+            'train_loss': f"{train_metrics['loss']:.6f}",
+            'train_precision': f"{train_metrics['precision']:.6f}",
+            'train_recall': f"{train_metrics['recall']:.6f}",
+            'train_f1': f"{train_metrics['f1']:.6f}",
+            'train_miou': f"{train_metrics['miou']:.6f}",
+            'val_loss': f"{val_metrics['loss']:.6f}",
+            'val_precision': f"{val_metrics['precision']:.6f}",
+            'val_recall': f"{val_metrics['recall']:.6f}",
+            'val_f1': f"{val_metrics['f1']:.6f}",
+            'val_miou': f"{val_metrics['miou']:.6f}",
+            'inference_time_ms': f"{val_metrics['inference_time_ms']:.4f}",
+            'fps': f"{val_metrics['fps']:.2f}",
+            'learning_rate': f"{lr:.8f}",
+        }
+        self.rows.append(row)
+        
+        # TensorBoard 记录
+        if self.writer is not None:
+            self.writer.add_scalar('Train/Loss', train_metrics['loss'], epoch)
+            self.writer.add_scalar('Train/Precision', train_metrics['precision'], epoch)
+            self.writer.add_scalar('Train/Recall', train_metrics['recall'], epoch)
+            self.writer.add_scalar('Train/F1', train_metrics['f1'], epoch)
+            self.writer.add_scalar('Train/mIoU', train_metrics['miou'], epoch)
+            
+            self.writer.add_scalar('Val/Loss', val_metrics['loss'], epoch)
+            self.writer.add_scalar('Val/Precision', val_metrics['precision'], epoch)
+            self.writer.add_scalar('Val/Recall', val_metrics['recall'], epoch)
+            self.writer.add_scalar('Val/F1', val_metrics['f1'], epoch)
+            self.writer.add_scalar('Val/mIoU', val_metrics['miou'], epoch)
+            self.writer.add_scalar('Val/Inference_Time_ms', val_metrics['inference_time_ms'], epoch)
+            self.writer.add_scalar('Val/FPS', val_metrics['fps'], epoch)
+            self.writer.add_scalar('Learning_Rate', lr, epoch)
+            
+    def save(self):
+        """保存 CSV"""
+        if self.local_rank == 0:
+            with open(self.csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=self.header)
+                writer.writeheader()
+                writer.writerows(self.rows)
+            print(f"\nTraining log saved to {self.csv_path}")
+            
+            if self.writer is not None:
+                self.writer.close()
+                
+    def append_loss(self, epoch, loss, val_loss):
+        """兼容原有的 LossHistory 接口"""
+        if self.loss_history is not None:
+            self.loss_history.append_loss(epoch, loss, val_loss)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='PSPNet 水域分割训练')
     
-    # 数据路径参数（新的命令行方式）
+    # 数据路径参数
     parser.add_argument('--images', type=str, default=None,
                         help='训练集图片目录路径')
     parser.add_argument('--masks', type=str, default=None,
@@ -237,18 +424,38 @@ if __name__ == "__main__":
     if not pretrained:
         weights_init(model)
     if model_path != '':
-        # 加载权重代码...
         print(f"加载权重: {model_path}")
-        # ... 原有加载逻辑
-        pass
+        # 加载权重（过滤非模型参数）
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        for key in ['epoch', 'optimizer', 'miou', 'metrics']:
+            checkpoint.pop(key, None)
+        if 'state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['state_dict'])
+        else:
+            model.load_state_dict(checkpoint)
 
-    # 记录Loss
+    # 记录模型信息
+    if local_rank == 0:
+        model_info = get_model_info(model)
+        info_path = Path(save_dir) / 'model_info.txt'
+        info_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(info_path, 'w') as f:
+            f.write(f"Backbone: {backbone}\n")
+            f.write(f"Total Parameters: {model_info['total_params']:,}\n")
+            f.write(f"Trainable Parameters: {model_info['trainable_params']:,}\n")
+            f.write(f"Model Size: {model_info['model_size_mb']:.2f} MB\n")
+            f.write(f"Input Channels: 3\n")
+            f.write(f"Output Channels: {num_classes}\n")
+            f.write(f"Input Shape: {input_shape}\n")
+        print(f"Model info: {model_info['total_params']:,} params, {model_info['model_size_mb']:.2f} MB")
+
+    # 创建指标记录器（替换原有的 LossHistory）
     if local_rank == 0:
         time_str = datetime.datetime.strftime(datetime.datetime.now(),'%Y_%m_%d_%H_%M_%S')
         log_dir = os.path.join(save_dir, "loss_" + str(time_str))
-        loss_history = LossHistory(log_dir, model, input_shape=input_shape)
+        metrics_logger = MetricsLogger(log_dir, model, input_shape=input_shape, local_rank=0)
     else:
-        loss_history = None
+        metrics_logger = None
         
     if fp16:
         from torch.cuda.amp import GradScaler as GradScaler
@@ -275,15 +482,13 @@ if __name__ == "__main__":
             model_train = model_train.cuda()
     
     #---------------------------#
-    #   数据集路径处理（核心修改）
+    #   数据集路径处理
     #---------------------------#
     
-    # 优先级1: 使用命令行指定的独立 train/val 路径
     if args.images is not None and args.masks is not None:
         train_image_dir = args.images
         train_label_dir = args.masks
         
-        # 如果指定了独立的 val 路径
         if args.val_images is not None and args.val_masks is not None:
             val_image_dir = args.val_images
             val_label_dir = args.val_masks
@@ -301,8 +506,6 @@ if __name__ == "__main__":
                                              label_ext, label_suffix)
             val_lines = get_files_from_dir(val_image_dir, val_label_dir, 
                                            label_ext, label_suffix)
-        
-        # 只指定了 train，需要自动划分
         else:
             if local_rank == 0:
                 print(f"\n{'='*50}")
@@ -319,11 +522,9 @@ if __name__ == "__main__":
                 label_ext=label_ext,
                 label_suffix=label_suffix
             )
-            # 验证集使用相同目录
             val_image_dir = train_image_dir
             val_label_dir = train_label_dir
     
-    # 优先级2: 使用旧版根目录配置
     elif args.dataset_root is not None:
         dataset_root = args.dataset_root
         image_folder = args.image_folder
@@ -393,7 +594,6 @@ if __name__ == "__main__":
     #------------------------------------------------------#
     if True:
         UnFreeze_flag = False
-        
         if Freeze_Train:
             for param in model.backbone.parameters():
                 param.requires_grad = False
@@ -421,12 +621,12 @@ if __name__ == "__main__":
         if epoch_step == 0 or epoch_step_val == 0:
             raise ValueError("数据集过小，无法继续进行训练，请扩充数据集。")
 
-        # 创建数据集 - 修改后的 PSPnetDataset 调用
+        # 创建数据集
         train_dataset = PSPnetDataset(
             train_lines, input_shape, num_classes, True, 
-            train_image_dir,  # 直接传入完整路径
-            '',  # image_folder 设为空（已包含在路径中）
-            train_label_dir,  # 直接传入完整路径
+            train_image_dir,
+            '',
+            train_label_dir,
             label_suffix, 
             label_ext, 
             is_2007=False
@@ -462,23 +662,11 @@ if __name__ == "__main__":
                             sampler=val_sampler, 
                             worker_init_fn=partial(worker_init_fn, rank=rank, seed=args.seed))
 
-        if local_rank == 0:
-            eval_callback = EvalCallback(
-                model, input_shape, num_classes, val_lines, 
-                val_image_dir,  # 传入验证集图片目录
-                log_dir, Cuda,
-                eval_flag=eval_flag, period=eval_period, 
-                image_folder='',  # 设为空
-                label_folder='',  # 设为空
-                label_suffix=label_suffix, 
-                label_ext=label_ext
-            )
-        else:
-            eval_callback = None
-        
         #---------------------------------------#
         #   开始模型训练
         #---------------------------------------#
+        best_miou = 0.0
+        
         for epoch in range(Init_Epoch, UnFreeze_Epoch):
             
             if epoch >= Freeze_Epoch and not UnFreeze_flag and Freeze_Train:
@@ -522,13 +710,127 @@ if __name__ == "__main__":
                 
             set_optimizer_lr(optimizer, lr_scheduler_func, epoch)
 
-            fit_one_epoch(model_train, model, loss_history, eval_callback, optimizer, epoch, 
-                    epoch_step, epoch_step_val, gen, gen_val, UnFreeze_Epoch, Cuda, 
-                    False, False, np.ones([num_classes], np.float32), False, 
-                    num_classes, fp16, scaler, save_period, save_dir, local_rank)
+            # 使用自定义的训练循环替代 fit_one_epoch，以获取详细指标
+            # 或者修改 fit_one_epoch 返回指标
+            
+            # 这里我们使用修改后的训练方式
+            if local_rank == 0:
+                print(f'\n=== Epoch {epoch+1}/{UnFreeze_Epoch} ===')
+            
+            # 训练阶段
+            model_train.train()
+            train_loss = 0
+            train_batches = 0
+            
+            for iteration, batch in enumerate(gen):
+                if iteration >= epoch_step:
+                    break
+                    
+                images, targets = batch[0], batch[1]
+                with torch.no_grad():
+                    images = images.to(device)
+                    targets = targets.to(device)
+                
+                # 清零梯度
+                optimizer.zero_grad()
+                
+                if not fp16:
+                    # 正常前向传播
+                    outputs = model_train(images)
+                    if isinstance(outputs, (list, tuple)):
+                        main_output = outputs[0]
+                    else:
+                        main_output = outputs
+                    
+                    loss = torch.nn.CrossEntropyLoss()(main_output, targets)
+                    
+                    # 反向传播
+                    loss.backward()
+                    optimizer.step()
+                else:
+                    from torch.cuda.amp import autocast
+                    with autocast():
+                        outputs = model_train(images)
+                        if isinstance(outputs, (list, tuple)):
+                            main_output = outputs[0]
+                        else:
+                            main_output = outputs
+                        loss = torch.nn.CrossEntropyLoss()(main_output, targets)
+                    
+                    # 缩放梯度
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                
+                train_loss += loss.item()
+                train_batches += 1
+                
+                if local_rank == 0:
+                    if iteration % 100 == 0:
+                        print(f"Train Batch {iteration}/{epoch_step}, Loss: {loss.item():.4f}")
+            
+            avg_train_loss = train_loss / train_batches if train_batches > 0 else 0
+            
+            # 计算训练集指标（简化版，只算一个batch的预测）
+            # 实际应该收集所有预测，这里为了效率在验证集上详细计算
+            
+            # 验证阶段 - 详细计算指标
+            if local_rank == 0:
+                print("Evaluating...")
+            
+            val_metrics = evaluate_metrics(model_train, gen_val, device, num_classes)
+            val_metrics['loss'] = val_metrics.get('loss', 0)  # 确保有loss
+            
+            # 构建训练指标（用loss填充，详细指标需要额外计算）
+            train_metrics = {
+                'loss': avg_train_loss,
+                'precision': 0,  # 可选：计算完整训练集指标
+                'recall': 0,
+                'f1': 0,
+                'miou': 0,
+            }
+            
+            # 如果需要详细训练指标，取消下面注释（会更慢）
+            train_metrics = evaluate_metrics(model_train, gen, device, num_classes)
+            
+            # 记录指标
+            if metrics_logger is not None:
+                metrics_logger.log_epoch(epoch + 1, train_metrics, val_metrics, 
+                                        optimizer.param_groups[0]['lr'])
+                metrics_logger.append_loss(epoch + 1, avg_train_loss, val_metrics['loss'])
+            
+            if local_rank == 0:
+                print(f">>> Train Loss: {train_metrics['loss']:.4f}")
+                print(f">>> Val Loss: {val_metrics['loss']:.4f}, mIoU: {val_metrics['miou']:.4f}, "
+                      f"F1: {val_metrics['f1']:.4f}, FPS: {val_metrics['fps']:.2f}")
+                
+                # 保存最佳模型
+                if val_metrics['miou'] > best_miou:
+                    best_miou = val_metrics['miou']
+                    best_path = os.path.join(save_dir, 'checkpoint_best.pth')
+                    torch.save({
+                        'epoch': epoch + 1,
+                        'state_dict': model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'miou': best_miou,
+                    }, best_path)
+                    print(f"New best model! mIoU: {best_miou:.4f}")
+                
+                # 定期保存
+                if (epoch + 1) % save_period == 0:
+                    periodic_path = os.path.join(save_dir, f'checkpoint_epoch{epoch+1}.pth')
+                    torch.save({
+                        'epoch': epoch + 1,
+                        'state_dict': model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                    }, periodic_path)
             
             if distributed:
                 dist.barrier()
 
+        # 保存最终日志
+        if metrics_logger is not None:
+            metrics_logger.save()
+            
         if local_rank == 0:
-            loss_history.writer.close()
+            print(f"\nTraining complete! Best Val mIoU: {best_miou:.4f}")

@@ -36,8 +36,24 @@ python train_water_val.py `
     --mask-ext .png `
     --no-freeze          # 跳过冻结训练阶段
 
+#训练模型（水域分割，train和val分开，pro版本指定存储结果）
+python train_water_val_pro.py `
+    --images D:\Files\Data\IRWSB\train\images `
+    --masks D:\Files\Data\IRWSB\train\masks_pspnet `
+    --val-images D:\Files\Data\IRWSB\val\images `
+    --val-masks D:\Files\Data\IRWSB\val\masks_pspnet `
+    --epochs 10 `
+    --batch-size 4 `
+    --learning-rate 1e-2 `
+    --model-dir checkpoints/exp_pspnet_01 `
+    --model-name pspnet_exp01 `
+    --log-dir logs/exp_pspnet_01 `
+    --log-name pspnet_exp01 `
+    --save-interval 0
 
-#训练模型（水域分割，train和val分开）
+
+
+#测试模型（水域分割，train和val分开）
 # 基础测试✅
 python test_water.py `
     --model logs/checkpoint_best.pth `

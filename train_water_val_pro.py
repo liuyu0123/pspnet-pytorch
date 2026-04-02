@@ -129,9 +129,14 @@ def compute_metrics(pred_mask, true_mask, num_classes):
         'miou': np.mean([m['iou'] for m in metrics_per_class]),
     }
     
-    # 前景类指标（最后一个类别，通常是水域/目标类别）
-    # 对于二分类（0=背景，1=前景），取最后一项
-    fg_metrics = metrics_per_class[-1]
+    # 前景类指标（强制按类别ID取，避免取错）
+    fg_class = num_classes - 1  # 二分类默认1是前景
+
+    fg_metrics = next((m for m in metrics_per_class if m['cls'] == fg_class), None)
+
+    if fg_metrics is None:
+        fg_metrics = {'precision': 0, 'recall': 0, 'f1': 0, 'iou': 0}
+
     foreground_metrics = {
         'fg_precision': fg_metrics['precision'],
         'fg_recall': fg_metrics['recall'],
@@ -195,7 +200,7 @@ def evaluate_metrics(model, dataloader, device, num_classes):
     metrics['fps'] = images.size(0) / np.mean(inference_times) if np.mean(inference_times) > 0 else 0
     
     # 诊断：检测是否全背景预测
-    if metrics['fg_recall'] == 0 and metrics['recall'] == 0.5:
+    if (all_preds == 0).all():
         print(f"\n[WARNING] 检测到模型预测全为背景（Foreground Recall=0）！")
         print("          这是训练初期的正常现象，建议：")
         print("          1. 增加训练epoch（建议10-50）")
@@ -750,6 +755,29 @@ if __name__ == "__main__":
                             drop_last=True, collate_fn=pspnet_dataset_collate, 
                             sampler=val_sampler, 
                             worker_init_fn=partial(worker_init_fn, rank=rank, seed=args.seed))
+        
+        # 创建一个专门用于评估的训练集（无增强）
+        train_eval_dataset = PSPnetDataset(
+            train_lines, input_shape, num_classes, False,  # 改为 False，禁用数据增强
+            train_image_dir,
+            '',
+            train_label_dir,
+            args.mask_suffix, 
+            args.mask_ext, 
+            is_2007=False
+        )
+        # 新增：用于计算训练指标（不shuffle，不drop_last）
+        gen_train_eval = DataLoader(
+            train_eval_dataset,  # 使用无增强的数据集
+            shuffle=False,
+            batch_size=batch_size,
+            num_workers=args.workers,
+            pin_memory=True,
+            drop_last=False,
+            collate_fn=pspnet_dataset_collate,
+            sampler=None,
+            worker_init_fn=partial(worker_init_fn, rank=rank, seed=args.seed)
+        )
 
         best_miou = 0.0
         start_epoch = 0
@@ -867,7 +895,7 @@ if __name__ == "__main__":
             val_metrics['loss'] = val_metrics.get('loss', 0)
             
             # 计算训练集指标（可选，更慢但更准确）
-            train_metrics = evaluate_metrics(model_train, gen, device, num_classes)
+            train_metrics = evaluate_metrics(model_train, gen_train_eval, device, num_classes)
             
             # 记录指标
             if metrics_logger is not None:
@@ -876,7 +904,7 @@ if __name__ == "__main__":
                 metrics_logger.append_loss(epoch + 1, avg_train_loss, val_metrics['loss'])
             
             if local_rank == 0:
-                print(f">>> Train Loss: {train_metrics['loss']:.4f}, "
+                print(f">>> Train Loss: {avg_train_loss:.4f}, "
                       f"Train mIoU: {train_metrics['miou']:.4f}, "
                       f"Train FG-Recall: {train_metrics.get('fg_recall', 0):.4f}")
                 print(f">>> Val Loss: {val_metrics['loss']:.4f}, "

@@ -213,7 +213,20 @@ def main():
             if gt_path:
                 try:
                     gt_img = Image.open(gt_path).convert('L')
-                    gt_mask = (np.array(gt_img) > 127).astype(np.uint8)
+                    gt_np = np.array(gt_img)
+                    unique_vals = np.unique(gt_np)
+                    print(f"  真值唯一值: {unique_vals}")# 打出来一定是 [0, 1]，而不是 [0, 255]
+
+                    if len(unique_vals) <= 2 and unique_vals.max() <= 1:
+                        # PSPNet 标准格式：像素值就是类别索引 0/1
+                        gt_mask = gt_np.astype(np.uint8)
+                    elif np.mean(gt_np > 127) > 0.5:
+                        # 白底黑水（背景=255，水体=0）
+                        gt_mask = (gt_np < 127).astype(np.uint8)
+                    else:
+                        # 黑底白水（背景=0，水体=255）
+                        gt_mask = (gt_np > 127).astype(np.uint8)
+
                     if gt_mask.shape != pr.shape:
                         gt_mask = cv2.resize(gt_mask, (pr.shape[1], pr.shape[0]), interpolation=cv2.INTER_NEAREST)
                     metrics = compute_metrics(pr, gt_mask)

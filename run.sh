@@ -78,11 +78,10 @@ python predict.py
 python predict_water.py
 
 #测试模型（pro版）推理并保存红色mask蒙版与csv性能报表
+# 如果是 resnet50 训练的，一定要加参数 --backbone resnet50
 python predict_water_best_pro.py `
     --input "D:\Files\Data\IRWSB\analyse\images" `
     --weights "F:\AAA\3_pspnet_best\experiment1\experiment1_last.pth" `
     --output "D:\Files\GitProject\pspnet-pytorch-LY\results_pspnet" `
     --ground_truth "D:\Files\Data\IRWSB\analyse\masks_pspnet" `
-    --alpha 0.5 `
-    --backbone resnet50
-
+    --alpha 0.5

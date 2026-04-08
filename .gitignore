@@ -141,3 +141,5 @@ dmypy.json
 
 img/*.jpg
 checkpoints
+
+results*/

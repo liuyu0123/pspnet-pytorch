@@ -42,9 +42,9 @@ python train_water_val_pro.py `
     --masks D:\Files\Data\IRWSB\train\masks_pspnet `
     --val-images D:\Files\Data\IRWSB\val\images `
     --val-masks D:\Files\Data\IRWSB\val\masks_pspnet `
-    --epochs 10 `
+    --epochs 100 `
     --batch-size 4 `
-    --learning-rate 1e-2 `
+    --learning-rate 1e-4 `
     --model-dir checkpoints/exp_pspnet_01 `
     --model-name pspnet_exp01 `
     --log-dir logs/exp_pspnet_01 `
@@ -76,3 +76,13 @@ python test_water.py `
 python predict.py
 #测试模型（水域分割）
 python predict_water.py
+
+#测试模型（pro版）推理并保存红色mask蒙版与csv性能报表
+python predict_water_best_pro.py `
+    --input "D:\Files\Data\IRWSB\analyse\images" `
+    --weights "F:\AAA\3_pspnet_best\experiment1\experiment1_last.pth" `
+    --output "D:\Files\GitProject\pspnet-pytorch-LY\results_pspnet" `
+    --ground_truth "D:\Files\Data\IRWSB\analyse\masks_pspnet" `
+    --alpha 0.5 `
+    --backbone resnet50
+
